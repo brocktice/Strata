@@ -1909,9 +1909,10 @@ The schema must accept only JSON objects at its root: `"type":"object"`, or an `
 object schemas (an `allOf` with an object member, or a local `$ref` to one, also counts), as apps written for
 llama.cpp's `json_schema` send. A root that also allows an array, string, number, boolean or null is refused. Local
 `#` references work; remote references are refused.
-`json_schema` is checked with the Python package `jsonschema` when it is installed (`python -m pip install
-"jsonschema>=4.23,<5"`; setup does not add it); without it the answer is only checked to be one JSON object, and the
-server says so once.
+`json_schema` is checked with the Python package `jsonschema`, installed by setup from `requirements.txt`.
+If the validator or one of its required packages cannot be imported, the request returns **503** with
+`error.code: structured_output_unavailable` before loading the engine or generating an answer. Install the server
+requirements and restart an older installation to enable it. `json_object` still needs only the standard library.
 
 This is **schema prompting followed by server validation**, not grammar-constrained decoding. One generation
 is made per request, with no hidden retry. Successful responses contain a validated JSON object. Malformed JSON,

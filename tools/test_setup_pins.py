@@ -320,12 +320,14 @@ class Requirements(unittest.TestCase):
 
     def test_an_install_from_before_the_pins_is_left_alone(self):
         lines = setup.requirement_lines()
-        legacy = sorted(setup.PY_PACKAGES) + ["nvidia-cublas==13.0.2.14"]
+        legacy = sorted(set(setup.PY_PACKAGES) - {"jsonschema", "referencing"}) + ["nvidia-cublas==13.0.2.14"]
         deps = {"markupsafe", "certifi", "charset-normalizer", "idna", "urllib3", "colorama"}
-        self.assertEqual(self.pip(legacy, lines, installed=deps)[0], [])
+        validator = [p for p in lines if setup.req_name(p) in {
+            "jsonschema", "referencing", "attrs", "jsonschema-specifications", "rpds-py", "typing-extensions"}]
+        self.assertEqual(self.pip(legacy, lines, installed=deps)[0], validator)
         missing = [p for p in legacy if p != "psutil"]                         # an older list without psutil
         ran, _ = self.pip(missing, lines, installed=deps)
-        self.assertEqual(ran, ["psutil==7.2.2"])
+        self.assertEqual(ran, ["psutil==7.2.2", *validator])
 
     def test_a_changed_pin_is_installed(self):
         lines = setup.requirement_lines()

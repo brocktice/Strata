@@ -10,13 +10,6 @@ from serve.frontend import ChatTemplate
 from serve import structured
 from serve.server import ByteTokenizer, MockEngine, Service, serve
 
-try:
-    import jsonschema  # noqa: F401
-    HAVE_JSONSCHEMA = True
-except ImportError:                  # optional: json_schema answers are then only checked to be one object
-    HAVE_JSONSCHEMA = False
-
-
 STORY = {"title": "Photobooth", "sheet": "A single continuous shot.", "cast": [],
          "boxes": [{"box": 1, "duration_ms": 15000, "new_shot": True, "beat": "Hailee changes poses.",
                     "on_screen": ["Hailee"], "references": [], "ends": "She smiles."}], "suggestions": []}
@@ -86,7 +79,6 @@ class Structured(unittest.TestCase):
         self.assertIn("reasoning_content", raw)
         self.assertIn("data: [DONE]", raw)
 
-    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
     def test_invalid_generation_is_an_error_and_never_streams_content(self):
         for script in ("## Film Plan - Photobooth", '{"title":"Only a title"}',
                        json.dumps({**STORY, "extra": True}),
@@ -122,7 +114,6 @@ class Structured(unittest.TestCase):
             self.assertEqual(self.chat()[0], 502)
             self.assertEqual(generate.call_count, 1)
 
-    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
     def test_invalid_schema_is_400_and_local_refs_work(self):
         for schema in ({"type": "object", "properties": {"x": {"type": "invalid"}}},
                        {"type": "object", "$ref": "https://other.example/schema"}):
@@ -146,16 +137,60 @@ class Structured(unittest.TestCase):
             self.assertEqual(self.request("/v1/chat/completions", [])[0], 400)
             load.assert_not_called()
 
-    def test_without_jsonschema_an_object_is_still_required(self):
-        # jsonschema is optional: without it json_schema answers are checked to be one JSON object, json_object
-        # never needs it, and nothing is imported at server start
+    def test_missing_validator_rejects_schema_before_loading_but_object_and_text_work(self):
         with mock.patch.object(structured, "_jsonschema", False):
-            self.assertEqual(self.chat()[0], 200)
-            for script in ("## Film Plan - Photobooth", "[1, 2]"):
-                code, reply = self.chat(script)
-                self.assertEqual(code, 502, script)
-                self.assertEqual(reply["error"]["code"], "structured_output_failed")
+            with mock.patch.object(self.svc, "load") as load:
+                for strict in (True, False, None):
+                    spec = {**FORMAT["json_schema"]}
+                    if strict is None:
+                        spec.pop("strict")
+                    else:
+                        spec["strict"] = strict
+                    for stream in (False, True):
+                        code, reply = self.chat(response_format={"type": "json_schema", "json_schema": spec},
+                                                stream=stream)
+                        self.assertEqual(code, 503)
+                        self.assertEqual(reply["error"]["code"], "structured_output_unavailable")
+                load.assert_not_called()
             self.assertEqual(self.chat('{"answer":4}', response_format={"type": "json_object"})[0], 200)
+            self.assertEqual(self.chat("Plain text.", response_format={"type": "text"})[0], 200)
+
+    def test_missing_validator_import_cannot_silently_accept_a_schema(self):
+        import builtins
+        original_import = builtins.__import__
+        for missing in ("jsonschema", "referencing"):
+            def importing(name, *args, **kwargs):
+                if name == missing:
+                    raise ImportError("unavailable test dependency")
+                return original_import(name, *args, **kwargs)
+            with self.subTest(missing=missing), mock.patch.object(structured, "_jsonschema", None), \
+                    mock.patch("builtins.__import__", side_effect=importing), \
+                    mock.patch.object(self.svc, "load") as load:
+                for _ in range(2):             # the cached import failure must reject later requests too
+                    code, reply = self.chat()
+                    self.assertEqual((code, reply["error"]["code"]), (503, "structured_output_unavailable"))
+                load.assert_not_called()
+
+    def test_nested_definition_is_not_a_valid_root_envelope(self):
+        # The first definition is an item, not the outer response. Both streaming and non-streaming requests
+        # must check the required envelope, rather than accepting any syntactically valid JSON object.
+        item = object_schema({"text": TEXT, "supported": {"type": "boolean"}})
+        schema = {"$defs": {"Claim": item}, **object_schema({
+            "claims": {"type": "array", "items": {"$ref": "#/$defs/Claim"}},
+            "complete": {"type": "boolean"}})}
+        fmt = {"type": "json_schema", "json_schema": {"name": "review", "strict": True, "schema": schema}}
+        claim = {"text": "The report has three rows.", "supported": True}
+        for value in (claim, {"claims": [claim]}, {"claims": [{**claim, "supported": "yes"}], "complete": True}):
+            with self.subTest(value=value):
+                code, reply = self.chat(json.dumps(value), response_format=fmt)
+                self.assertEqual((code, reply["error"]["code"]), (502, "structured_output_failed"))
+                _, raw = self.chat(json.dumps(value), response_format=fmt, stream=True)
+                self.assertIn('"structured_output_failed"', raw)
+                self.assertNotIn('"delta"', raw)
+        envelope = {"claims": [claim], "complete": True}
+        code, reply = self.chat(json.dumps(envelope), response_format=fmt)
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(reply["choices"][0]["message"]["content"]), envelope)
 
     def test_root_unions_of_object_shapes_are_accepted(self):
         # A root anyOf of object shapes (sent by apps written against llama.cpp's grammar path) still means
