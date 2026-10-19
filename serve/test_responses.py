@@ -455,18 +455,26 @@ class OverHttp(Server):
         code, events = self.post({"model": "m", "input": "a number", "text": {"format": fmt}, "stream": True})
         self.assertEqual([e["delta"] for e in events if e["type"] == "response.output_text.delta"], ["{\"n\":3}"])
         self.assertEqual(events[-1]["type"], "response.completed")
-        # an answer that fails the schema - only jsonschema can tell: it is optional (serve/structured.py), and
-        # without it a json_schema answer is checked to be one JSON object, which {"n": 3} is
-        try:
-            import jsonschema  # noqa: F401
-        except ImportError:
-            return
+        # A syntactically valid object must still satisfy its declared schema.
         bad = {**fmt, "schema": {**fmt["schema"], "properties": {"n": {"type": "string"}}}}
         code, r = self.post({"model": "m", "input": "a number", "text": {"format": bad}})
         self.assertEqual((code, r["error"]["code"]), (502, "structured_output_failed"))
         code, events = self.post({"model": "m", "input": "a number", "text": {"format": bad}, "stream": True})
         self.assertEqual(events[-1]["type"], "response.failed")
         self.assertEqual(events[-1]["response"]["error"]["code"], "structured_output_failed")
+
+    def test_missing_schema_validator_fails_before_loading_or_streaming(self):
+        from unittest import mock
+        from serve import structured
+        fmt = {"type": "json_schema", "name": "answer", "strict": True,
+               "schema": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}}
+        with mock.patch.object(structured, "_jsonschema", False), mock.patch.object(self.svc, "load") as load:
+            for stream in (False, True):
+                code, reply = self.post({"model": "m", "input": "a number", "text": {"format": fmt},
+                                         "stream": stream})
+                self.assertEqual((code, reply["error"]["code"]), (503, "structured_output_unavailable"))
+                self.assertEqual(reply["error"]["type"], "server_error")
+            load.assert_not_called()
 
     def test_monitor_and_status(self):
         self.svc.api_monitor = True

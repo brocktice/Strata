@@ -3,9 +3,9 @@
 The native engine has no grammar decoder. Failed generations are errors, never
 silently retried or returned as successful structured output.
 
-`jsonschema` is optional (no new hard dependency of the server): json_object needs only the standard library, and
-json_schema is checked against its schema when the package is installed - without it, only that the answer is one
-JSON object, and the server says so once.
+json_object needs only the standard library. json_schema requires the installed
+schema validator; a missing dependency is an error before generation, never a
+weaker JSON-object-only check.
 """
 import json
 import threading
@@ -15,8 +15,12 @@ class StructuredOutputError(RuntimeError):
     pass
 
 
+class StructuredOutputUnavailable(RuntimeError):
+    pass
+
+
 class _ObjectOnly:
-    """The validator for json_object, and for json_schema without jsonschema: one JSON object."""
+    """The validator for json_object: one JSON object."""
 
     def iter_errors(self, value):
         if not isinstance(value, dict):
@@ -33,7 +37,7 @@ _jsonschema_lock = threading.Lock()
 
 
 def jsonschema_modules():
-    """jsonschema, imported on first use; None when it is not installed (said once, in the server window)."""
+    """jsonschema, imported on first use; None when its required packages cannot be imported."""
     global _jsonschema
     with _jsonschema_lock:
         if _jsonschema is None:
@@ -45,9 +49,6 @@ def jsonschema_modules():
                 _jsonschema = (validators, SchemaError, Registry, NoSuchResource)
             except ImportError:
                 _jsonschema = False
-                print('[strata] response_format json_schema: the Python package jsonschema is not installed, so '
-                      'answers are only checked to be one JSON object (python -m pip install "jsonschema>=4.23,<5")',
-                      flush=True)
         return _jsonschema or None
 
 
@@ -104,6 +105,9 @@ def prepare_format(response_format, messages, with_tools=False):
             raise ValueError("response_format schema must accept only JSON objects at its root "
                              "(type object, or anyOf/oneOf of object schemas)")
         modules = jsonschema_modules()
+        if modules is None:
+            raise StructuredOutputUnavailable(
+                "JSON Schema validation is unavailable; install the server requirements and restart the server")
     else:
         raise ValueError("response_format.type must be text, json_object or json_schema")
 
